@@ -1,0 +1,21 @@
+# .gitignore
+
+# Pythonキャッシュファイル
+__pycache__/
+*.pyc
+
+# 仮想環境フォルダ
+venv/
+.venv/
+
+# Streamlitのシークレットファイル（APIキーやパスワード）
+.streamlit/secrets.toml
+
+# データベースファイル
+*.db
+
+# 生成された画像ファイル
+*.png
+
+# IDE/エディタの設定ファイル
+.vscode/
