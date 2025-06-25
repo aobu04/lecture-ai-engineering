@@ -169,13 +169,27 @@ if check_password():
     # ★新規: 全生徒の合計点をリストで取得する関数
     def get_all_student_total_scores():
         conn = sqlite3.connect('qa.db'); cursor = conn.cursor()
-        # ユーザーごとに獲得点の合計を計算
-        cursor.execute("""
-            SELECT SUM(awarded_score)
-            FROM answers_history
-            GROUP BY user_id
-        """)
-        scores = [row[0] for row in cursor.fetchall()]
+        # 以前get_question_statsで使ったものと同じ、初回挑戦のみを抽出するロジックを使用
+        query = """
+            WITH FirstAttempts AS (
+                SELECT
+                    user_id,
+                    awarded_score,
+                    ROW_NUMBER() OVER(PARTITION BY user_id, question_id ORDER BY answered_at ASC) as attempt_rank
+                FROM answers_history
+            )
+            SELECT 
+                SUM(awarded_score)
+            FROM 
+                FirstAttempts
+            WHERE 
+                attempt_rank = 1
+            GROUP BY 
+                user_id
+        """
+        cursor.execute(query)
+        # SUM(awarded_score)がNoneになるケースを考慮して、0に変換
+        scores = [row[0] if row[0] is not None else 0 for row in cursor.fetchall()]
         conn.close()
         return scores
     
@@ -288,13 +302,14 @@ if check_password():
             return []
         
     # ★新規: 全てのデータを統合し、AIに評価と改善策を提案させる関数
-    def generate_ai_analysis(scope, score_stats_df, feedback_df, questions_df):
+    def generate_ai_analysis(scope, score_stats_df, feedback_df, questions_df, user_query=None):
         # AIに渡すためのテキストデータを作成
         prompt_data = f"分析対象: {scope}\n\n"
         
         # 1. 得点率データ
         prompt_data += "--- 問題別の得点率データ ---\n"
         if not score_stats_df.empty:
+            rate_column = 'score_rate' if 'score_rate' in score_stats_df.columns else ('individual_score_rate' if 'individual_score_rate' in score_stats_df.columns else 'overall_score_rate')
             for q_id, row in score_stats_df.iterrows():
                 question_text = questions_df.loc[q_id, 'question_text']
                 score_rate = row.get('score_rate', 0)
@@ -312,41 +327,53 @@ if check_password():
                 prompt_data += f"- {row['free_text_comment']}\n"
         else:
             prompt_data += "フィードバックデータなし\n"
+
+
+        if user_query:
+            # カスタム分析モード
+            final_prompt = f"""
+            あなたは優秀なデータアナリストです。以下の背景データに基づき、ユーザーからのプロンプトをもとに的確な分析をお願いします。ユーザーからのプロンプトが質問であった場合には的確な回答をお願いします。
+
+            # 背景データ
+            {prompt_data}
+
+            # ユーザーからのプロンプト
+            {user_query}
+            """
+            role_prompt = "You are a helpful data analyst."
+        else:
+            # AIへの指示（プロンプト）
+            final_prompt = f"""
+            あなたは優秀な教育データアナリストです。
+            講義内容や説明方法の改善策の提案をしてもらいたいです。
+            また生徒の正確な理解度把握のため、QAの質やアンケートの取り方についても改善策を提案してもらいたいです。
+            以下の全体もしくは個人の生徒の成績データとフィードバックを総合的に分析し、講義内容や説明方式、あるいは生成されたQAの質や実施したアンケートに関する「評価」と「具体的な改善策の提案」を日本語で記述してください。
+
+            # 分析データ
+            {prompt_data}
+
+            # 出力形式
+            以下のMarkdown形式で、簡潔かつ分かりやすくまとめてください。
+
+            ### 総合評価
+            （ここに参加者全体の、あるいは個人の理解度や満足度に関する客観的な評価を記述してください。特に得点率が低い問題や、具体的なフィードバック内容に言及してください。）
+
+            ### 講義内容に関する改善点の提案
+            1. （評価に基づいて、講義内容、説明方法の改善に関する具体的なアクションアイテムを提案してください。）
+            2. （2つ目の提案）
+            3. （3つ目の提案）
+
+            ### QA＆アンケートに関する改善点の提案
+            1. （評価に基づいて、生成されたQAや実施したアンケートの改善に関する具体的なアクションアイテムを提案してください。）
+            2. （2つ目の提案）
+            3. （3つ目の提案）
+
+            """
+            role_prompt = "You are an excellent educational data analyst."
             
-        # AIへの指示（プロンプト）
-        final_prompt = f"""
-        あなたは優秀な教育データアナリストです。
-        講義内容や説明方法の改善策の提案をしてもらいたいです。
-        また生徒の正確な理解度把握のため、QAの質やアンケートの取り方についても改善策を提案してもらいたいです。
-        以下の全体もしくは個人の生徒の成績データとフィードバックを総合的に分析し、講義内容や説明方式、あるいは生成されたQAの質や実施したアンケートに関する「評価」と「具体的な改善策の提案」を日本語で記述してください。
-
-        # 分析データ
-        {prompt_data}
-
-        # 出力形式
-        以下のMarkdown形式で、簡潔かつ分かりやすくまとめてください。
-
-        ### 総合評価
-        （ここに参加者全体の、あるいは個人の理解度や満足度に関する客観的な評価を記述してください。特に得点率が低い問題や、具体的なフィードバック内容に言及してください。）
-
-        ### 講義内容に関する改善点の提案
-        1. （評価に基づいて、講義内容、説明方法の改善に関する具体的なアクションアイテムを提案してください。）
-        2. （2つ目の提案）
-        3. （3つ目の提案）
-
-        ### QA＆アンケートに関する改善点の提案
-        1. （評価に基づいて、生成されたQAや実施したアンケートの改善に関する具体的なアクションアイテムを提案してください。）
-        2. （2つ目の提案）
-        3. （3つ目の提案）
-
-        """
-        
         try:
             client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": final_prompt}]
-            )
+            response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": role_prompt}, {"role": "user", "content": final_prompt}])
             return response.choices[0].message.content
         except Exception as e:
             return f"AI分析中にエラーが発生しました: {e}"
@@ -463,7 +490,9 @@ if check_password():
 
         # ★追加: 全問題の統計情報を最初に取得
         question_stats = get_question_stats()
-
+        all_users = get_all_user_ids()
+        total_student_count = len(all_users)
+        
         conn = sqlite3.connect('qa.db'); cursor = conn.cursor()
         cursor.execute("SELECT id, question_type, question_text, options, answers, explanation, difficulty, points FROM questions ORDER BY id ASC")
         all_questions = cursor.fetchall(); conn.close()
@@ -478,7 +507,8 @@ if check_password():
                 stats = question_stats.get(q_id, {'attempts': 0, 'corrects': 0})
                 attempts = stats['attempts']
                 corrects = stats['corrects']
-                # 正答率を計算
+                # 回答率・正答率を計算
+                response_rate = (attempts / total_student_count * 100) if total_student_count > 0 else 0
                 correct_rate = (corrects / attempts * 100) if attempts > 0 else 0
 
                 if st.session_state.editing_question_id == q_id:
@@ -553,7 +583,7 @@ if check_password():
                         # ★追加: 統計情報を表示
                         col1, col2 = st.columns(2)
                         with col1:
-                            st.metric("回答数 (初回挑戦)", f"{attempts} 回")
+                            st.metric("回答率 (初回挑戦)", f"{response_rate:.1f} %")
                         with col2:
                             st.metric("平均正答率 (初回挑戦)", f"{correct_rate:.1f} %")
                         
@@ -662,31 +692,70 @@ if check_password():
         
         st.divider()
         st.header("AIによる総合分析")
+        ai_tab1, ai_tab2 = st.tabs(["自動分析レポート", "カスタム分析"])
         
-        if st.button("総合分析を実行する"):
-            # 分析に必要なデータを準備
-            target_scope = selected_user
+        with ai_tab1:
+            st.subheader("講義内容とQA＆アンケート内容の自動評価")
+            if st.button("自動分析レポートを生成", key="auto_analysis_button"):
+                # 分析に必要なデータを準備
+                target_scope = selected_user
+                
+                # 1. スコアデータ
+                stats_data_for_ai = individual_stats_data if target_scope != "全体" else overall_stats_data
+                score_df_for_ai = pd.DataFrame.from_dict(stats_data_for_ai, orient='index')
+                if not score_df_for_ai.empty:
+                    score_df_for_ai['score_rate'] = (score_df_for_ai['total_awarded'] / score_df_for_ai['total_possible']) * 100
+
+                # 2. フィードバックデータ
+                all_feedback_df = get_feedback_data()
+                feedback_df_for_ai = all_feedback_df[all_feedback_df['user_id'] == target_scope] if target_scope != "全体" else all_feedback_df
+
+                # 3. 問題文データ
+                conn = sqlite3.connect('qa.db');
+                questions_df_for_ai = pd.read_sql_query("SELECT id, question_text FROM questions", conn).set_index('id')
+                conn.close()
+
+                # AI分析を実行
+                with st.spinner("AIが総合分析レポートを作成しています..."):
+                    # user_queryなしで呼び出す
+                    analysis_result = generate_ai_analysis(selected_user, score_df_for_ai, feedback_df_for_ai, questions_df_for_ai)
+                    st.session_state.auto_analysis_result = analysis_result
             
-            # 1. スコアデータ
-            stats_data_for_ai = individual_stats_data if target_scope != "全体" else overall_stats_data
-            score_df_for_ai = pd.DataFrame.from_dict(stats_data_for_ai, orient='index')
-            if not score_df_for_ai.empty:
-                score_df_for_ai['score_rate'] = (score_df_for_ai['total_awarded'] / score_df_for_ai['total_possible']) * 100
-
-            # 2. フィードバックデータ
-            all_feedback_df = get_feedback_data()
-            feedback_df_for_ai = all_feedback_df[all_feedback_df['user_id'] == target_scope] if target_scope != "全体" else all_feedback_df
-
-            # 3. 問題文データ
-            conn = sqlite3.connect('qa.db');
-            questions_df_for_ai = pd.read_sql_query("SELECT id, question_text FROM questions", conn).set_index('id')
-            conn.close()
-
-            # AI分析を実行
-            with st.spinner("AIが成績とフィードバックを総合的に分析しています..."):
-                analysis_result = generate_ai_analysis(target_scope, score_df_for_ai, feedback_df_for_ai, questions_df_for_ai)
-                st.session_state.last_analysis_result = analysis_result
+            # 分析結果を表示
+            if 'auto_analysis_result' in st.session_state:
+                st.markdown(st.session_state.auto_analysis_result)
         
-        # 分析結果を表示
-        if 'last_analysis_result' in st.session_state:
-            st.markdown(st.session_state.last_analysis_result)
+        with ai_tab2:
+            st.subheader("自由な指示・質問でAIに分析を依頼")
+            user_query = st.text_area("AIに聞きたいこと・分析してほしいことを入力してください。", 
+                                     placeholder="例：得点率が最も低かった問題は何ですか？また、その理由として考えられることをフィードバックのコメントから推測してください。")
+            if st.button("AIに質問・分析依頼する", key="custom_analysis_button"):
+                if user_query:
+                    # 分析に必要なデータを準備
+                    target_scope = selected_user
+                    
+                    # 1. スコアデータ
+                    stats_data_for_ai = individual_stats_data if target_scope != "全体" else overall_stats_data
+                    score_df_for_ai = pd.DataFrame.from_dict(stats_data_for_ai, orient='index')
+                    if not score_df_for_ai.empty:
+                        score_df_for_ai['score_rate'] = (score_df_for_ai['total_awarded'] / score_df_for_ai['total_possible']) * 100
+
+                    # 2. フィードバックデータ
+                    all_feedback_df = get_feedback_data()
+                    feedback_df_for_ai = all_feedback_df[all_feedback_df['user_id'] == target_scope] if target_scope != "全体" else all_feedback_df
+
+                    # 3. 問題文データ
+                    conn = sqlite3.connect('qa.db');
+                    questions_df_for_ai = pd.read_sql_query("SELECT id, question_text FROM questions", conn).set_index('id')
+                    conn.close()
+
+                with st.spinner("AIがあなたの質問を分析・回答しています..."):
+                    # user_queryありで呼び出す
+                    analysis_result = generate_ai_analysis(selected_user, score_df_for_ai, feedback_df_for_ai, questions_df_for_ai, user_query)
+                    st.session_state.custom_analysis_result = analysis_result
+            else:
+                st.warning("質問を入力してください。")
+
+        if 'custom_analysis_result' in st.session_state:
+            st.markdown(st.session_state.custom_analysis_result)
+
