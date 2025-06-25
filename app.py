@@ -255,12 +255,17 @@ if check_password():
         return chart_path
 
     # --- QA生成のロジック（変更なし） ---
-    def create_qa_set(lecture_text, difficulty_level, num_questions_mode, num_questions_manual=5):
+    def create_qa_set(lecture_text, difficulty_level, num_questions_mode, num_questions_manual=5, additional_prompt=""):
         # モードに応じてプロンプトの「問題数」に関する部分を組み立てる
         if num_questions_mode == "AIにおまかせ":
             count_instruction = "まず、このテキスト全体の要点を把握し、学習者が理解度を確認するのに適切だと思われる問題数を3問から10問の範囲で判断してください。その後、あなたが判断したその問題数で、以下の指示に従って問題セットを生成してください。"
         else: # 手動指定の場合
             count_instruction = f"問題を合計{num_questions_manual}問作成してください。"
+
+        # ★新規: 追加のプロンプトがあれば、指示に加える
+        additional_instruction = ""
+        if additional_prompt and additional_prompt.strip() != "":
+            additional_instruction = f"\n    - 追加指示: {additional_prompt}"
 
         # 共通のプロンプト部分
         prompt = f"""
@@ -431,7 +436,12 @@ if check_password():
                     )
                 else:
                     num_q_manual = 5 # 使わないがデフォルト値を設定
-                    st.info("AIがテキスト量に応じて問題数を自動で判断します。")
+                    additional_prompt = st.text_area(
+                        "AIへの追加指示 (任意)",
+                        placeholder="例: 専門用語の定義を問う問題を多めにしてください。問題数は10問にしてください。",
+                        height=100,
+                        key="additional_prompt_input"
+                    )
             
             difficulty = st.radio("難易度", ('簡単', '普通', '難しい'), index=1, horizontal=True, key="difficulty_radio")
 
@@ -455,7 +465,8 @@ if check_password():
                             source_text, 
                             difficulty, 
                             num_q_mode, 
-                            num_q_manual if num_q_mode == "手動で指定" else None
+                            num_q_manual if num_q_mode == "手動で指定" else None,
+                            additional_prompt if num_q_mode == "AIにおまかせ" else ""
                         )
                         if questions_list:
                             conn = sqlite3.connect('qa.db'); cursor = conn.cursor()
